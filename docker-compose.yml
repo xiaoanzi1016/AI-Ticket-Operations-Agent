@@ -1,0 +1,79 @@
+# ======================================================================
+# 智能工单售后 Agent — docker compose 编排（Phase 2）
+#
+# 启动： docker compose up --build
+# 停止： docker compose down
+# 日志： docker compose logs -f api
+#
+# 说明：**单服务即可**。SQLite 是文件型数据库，不需要单独的数据库容器；
+#       后台任务队列是进程内的 asyncio.Queue，也不需要 Redis。
+# ======================================================================
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-ticket-operations-agent:phase2
+    container_name: ai-ticket-agent-api
+
+    # ---- 端口映射：宿主机 8000 -> 容器 8000 ----
+    # 左边可用 .env 里的 API_PORT 覆盖（compose 会自动加载同目录的 .env 做变量替换）
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+    # ---- 环境变量 ----
+    # 这里用 ${VAR:-默认值} 的写法而不是 env_file：
+    # compose 本来就会自动加载同目录的 .env 做变量替换，所以两种效果一样；
+    # 但这种方式在 .env 不存在时也能正常启动（走默认值），不会因为缺文件直接报错。
+    # 好处还有：一眼能看清"容器到底会拿到哪些配置"，不用去翻 .env。
+    environment:
+      # 模型：本项目读 MODEL_*；只填了 DEEPSEEK_* 也行（src/api/settings.py 会自动映射）
+      MODEL_API_KEY: "${MODEL_API_KEY:-}"
+      MODEL_BASE_URL: "${MODEL_BASE_URL:-https://api.deepseek.com}"
+      MODEL_NAME: "${MODEL_NAME:-deepseek-v4-flash}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      DEEPSEEK_MODEL: "${DEEPSEEK_MODEL:-}"
+      SESSION_TTL_SECONDS: "${SESSION_TTL_SECONDS:-1800}"
+      # 数据库固定在挂载出来的 data/ 目录，做到"容器删了重建，审计记录还在"
+      AGENT_DB_PATH: "/app/data/agent_operations.db"
+      # 服务与队列
+      WORKERS: "${WORKERS:-1}"
+      MAX_QUEUE_SIZE: "${MAX_QUEUE_SIZE:-1000}"
+      # 上传
+      MAX_UPLOAD_SIZE: "${MAX_UPLOAD_SIZE:-10485760}"
+      ALLOWED_UPLOAD_SUFFIXES: "${ALLOWED_UPLOAD_SUFFIXES:-.xlsx,.xls,.csv}"
+      USE_UPLOADED_DATASET: "${USE_UPLOADED_DATASET:-true}"
+      KEEP_UPLOAD_FILES: "${KEEP_UPLOAD_FILES:-false}"
+      # 调试开关：设成 true 就完全不调大模型，适合离线演示
+      AGENT_FORCE_MOCK: "${AGENT_FORCE_MOCK:-false}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+      # 时区：用环境变量而不是 compose 的 tz 键 —— 老版本 compose 不认 tz，
+      # 会直接报 "Additional property tz is not allowed" 导致起不来。
+      # 日志时间与本地一致才方便排查。
+      TZ: "${TZ:-Asia/Shanghai}"
+
+    # ---- 卷挂载（开发模式）----
+    # 把本地代码挂进容器，配合 --reload 做到"改完代码立刻生效，不用重建镜像"。
+    # data/ 必须挂出来：否则容器一删，SQLite 里的审计记录就没了。
+    volumes:
+      - ./src:/app/src                      # 业务代码（含 src/api）
+      - ./scripts:/app/scripts              # 命令行/启动脚本
+      - ./tests:/app/tests                  # 测试（可在容器里跑 pytest）
+      - ./data:/app/data                    # 数据库 + data/mock 源数据
+      - ./logs:/app/logs                    # 日志
+      - ./outputs:/app/outputs              # 评测/报告产物
+      - ./requirements.txt:/app/requirements.txt:ro
+
+    # 开发模式启动命令：开启热重载。
+    # 生产部署请删除这一行，改用镜像内置的 CMD（不带 --reload）。
+    command:
+      ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    restart: unless-stopped

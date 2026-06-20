@@ -1,0 +1,51 @@
+# ======================================================================
+# Docker 构建上下文排除清单（Phase 2）
+#
+# 为什么必须有这个文件：Dockerfile 里有 `COPY . .`，
+# 而 Docker **完全无视 .gitignore**。没有这份清单，宿主机的
+# .venv/（几百 MB 的 Windows 虚拟环境）和 data/agent_operations.db
+# 会被一起打进镜像 —— 镜像体积暴涨，还可能覆盖容器里的 Linux 依赖。
+# ======================================================================
+
+# 虚拟环境（宿主机的，容器里用不到）
+.venv/
+venv/
+env/
+
+# 版本控制与 IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 环境变量：密钥只通过 --env-file / compose environment 注入，绝不进镜像
+.env
+.env.*
+
+# 运行产物
+logs/
+outputs/
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+*.log
+*.tmp
+
+# 文档（镜像里用不到，减小体积；需要的话可以删掉这一行）
+docs/
+*.md
+!README.md
+
+# 容器编排文件自身
+Dockerfile
+docker-compose.yml
+.dockerignore
