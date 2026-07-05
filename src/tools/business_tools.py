@@ -94,20 +94,30 @@ def create_suggestion(ticket: Ticket, reasoning: str, use_llm: bool = False,
 
     actions: list[Action] = []
     if ticket.issue_type in ("少发", "漏发"):
+        # 规则版：能唯一定位 SKU 时补上（否则库存闸门会保守转人工，属预期行为）
+        params: dict = {"qty": 1, "order_id": ticket.related_order_id}
+        order = data_source.get_order(ticket.related_order_id) if ticket.related_order_id else None
+        if order and order.items:
+            unique_skus = {it["sku"] for it in order.items if it.get("sku")}
+            if len(unique_skus) == 1:
+                params["sku"] = unique_skus.pop()
         actions.append(
             Action(
                 type=ActionType.REISSUE,
-                params={"qty": 1, "order_id": ticket.related_order_id},
+                params=params,
                 risk=RiskLevel.HIGH,
                 reason=reasoning,
                 requires_approval=True,
             )
         )
     elif ticket.issue_type == "退款":
+        # 退款金额取订单实际金额（原实现硬编码 199.0，与订单无关，属正确性缺陷）
+        order = data_source.get_order(ticket.related_order_id) if ticket.related_order_id else None
+        amount = float(order.amount) if order else 0.0
         actions.append(
             Action(
                 type=ActionType.REFUND,
-                params={"amount": 199.0, "order_id": ticket.related_order_id},
+                params={"amount": amount, "order_id": ticket.related_order_id},
                 risk=RiskLevel.HIGH,
                 reason=reasoning,
                 requires_approval=True,

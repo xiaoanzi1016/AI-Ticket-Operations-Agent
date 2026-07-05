@@ -26,6 +26,22 @@ class ToolRegistry:
             raise KeyError(f"未知工具: {name}")
         return self._tools[name]["handler"]
 
+    def required_params(self, name: str) -> list[str]:
+        """返回该工具的必填参数名（供编排层做调用前校验）。"""
+        t = self._tools.get(name)
+        if t is None:
+            return []
+        params = t["schema"].get("function", {}).get("parameters", {})
+        return list(params.get("required", []))
+
+    def param_names(self, name: str) -> list[str]:
+        """返回该工具声明的全部参数名（用于过滤 LLM 多传的字段）。"""
+        t = self._tools.get(name)
+        if t is None:
+            return []
+        props = t["schema"].get("function", {}).get("parameters", {}).get("properties", {})
+        return list(props.keys())
+
     def openai_schemas(self) -> list[dict]:
         """返回给 LLM 的 tools 列表（OpenAI 兼容格式）。"""
         return [t["schema"] for t in self._tools.values()]
