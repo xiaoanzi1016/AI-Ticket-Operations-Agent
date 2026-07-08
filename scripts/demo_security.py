@@ -19,6 +19,11 @@ print("=" * 66)
 print("场景 1：LLM 参数别名攻击 —— quantity 不再绕过数量上限")
 print("=" * 66)
 gate = SafetyGate()
+
+# 数据源（后续场景共用）
+ds = DataSource()
+ds.load()
+
 # LLM 用别名 quantity 输出一个超大补发数量（原本 qty 校验会失效）
 attack = Action(ActionType.REISSUE, {"quantity": 9999, "order_id": "PO1"}, RiskLevel.HIGH)
 ok, req, msg = gate.check(attack, "T1")
@@ -56,30 +61,100 @@ print("✅ 关键参数缺失被明确拒绝")
 
 print()
 print("=" * 66)
+print("场景 1d：业务相对约束 —— 退款不得超过订单实付金额（本轮新增）")
+print("=" * 66)
+refundable = [o for o in ds.all_orders()
+              if o.amount > 0 and o.status in ("已付款待发货", "已发货", "已完成")]
+small = min(refundable, key=lambda x: x.amount)
+print(f"选取金额最小的可退款订单: {small.order_id} = {small.amount} 元（状态 {small.status}）")
+
+over = Action(ActionType.REFUND, {"amount": 4999.0, "order_id": small.order_id}, RiskLevel.HIGH)
+ok5, _, msg5 = gate.check(over, "T5")
+print(f"check(refund 4999 元 / 订单实付 {small.amount} 元): 放行={ok5} 说明={msg5}")
+assert ok5 is False and "超过订单实付" in msg5, "超额退款应被相对约束拦截"
+print("✅ 超额退款被拦截（旧实现只校验绝对上限 5000，会放行 4999 元）")
+
+normal = Action(ActionType.REFUND,
+                {"amount": small.amount, "order_id": small.order_id}, RiskLevel.HIGH)
+ok6, req6, msg6 = gate.check(normal, "T6")
+print(f"check(refund 等于订单实付): 放行={ok6} 待确认={req6 is not None} 说明={msg6}")
+assert ok6 is True and req6 is not None
+print("✅ 正常金额通过校验并进入人工二次确认")
+
+# 订单不存在 -> 拒绝
+ghost = Action(ActionType.REFUND, {"amount": 10, "order_id": "PO00000000-00000"}, RiskLevel.HIGH)
+ok7, _, msg7 = gate.check(ghost, "T7")
+print(f"check(refund 订单不存在): 放行={ok7} 说明={msg7}")
+assert ok7 is False
+
+# 参数宽容化：字符串数字不再误判
+soft = Action(ActionType.REISSUE, {"qty": "1", "order_id": small.order_id}, RiskLevel.HIGH)
+ok8, _, msg8 = gate.check(soft, "T8")
+print(f"check(reissue qty='1' 字符串): 放行={ok8} 说明={msg8}")
+assert ok8 is True, "字符串数字应被宽容解析"
+print("✅ 字符串数字宽容解析 + 订单不存在拒绝")
+
+# 别名冲突 -> 明确拒绝（不再静默取其一）
+conflict = Action(ActionType.REISSUE, {"qty": 1, "quantity": 9999, "order_id": small.order_id},
+                  RiskLevel.HIGH)
+ok9, _, msg9 = gate.check(conflict, "T9")
+print(f"check(别名冲突 qty=1 / quantity=9999): 放行={ok9} 说明={msg9}")
+assert ok9 is False
+print("✅ 别名冲突被明确拒绝（旧实现会取 qty=1 静默生效）")
+
+
+print()
+print("=" * 66)
 print("场景 2：库存闸门 —— 补发前校验库存")
 print("=" * 66)
-ds = DataSource()
-ds.load()
-# 找一个可用库存很少的商品组合（缺货/不足）
-order = ds.all_orders()[0]
+# 必须挑「单 SKU 订单」，否则会被"无法确定补发 SKU"提前拦截，测不到数量比较
+order = None
+sku = None
+for o in ds.all_orders():
+    if o.status not in ("已付款待发货", "已发货", "已完成"):
+        continue
+    skus = {it["sku"] for it in o.items if it.get("sku")}
+    if len(skus) == 1:
+        cand = next(iter(skus))
+        inv0 = ds.get_inventory(o.store, cand)
+        if inv0 and inv0["available"] >= 1:
+            order, sku = o, cand
+            break
+if order is None:
+    order = ds.all_orders()[0]
+    sku = order.items[0]["sku"]
+
 store = order.store
-sku = order.items[0]["sku"]
 inv = ds.get_inventory(store, sku)
-print(f"目标: 门店={store} sku={sku} 可用库存={inv['available'] if inv else '无'}")
+print(f"目标: 订单={order.order_id} 门店={store} sku={sku} "
+      f"可用库存={inv['available'] if inv else '无'}")
 
-# 用一个超大补发数量（> 库存）触发拦截
 agent = create_agent(mock=True)
-big = Action(ActionType.REISSUE, {"qty": 1000000, "order_id": order.order_id}, RiskLevel.HIGH)
-ok_inv, inv_msg = agent._inventory_gate(big, order)
-print(f"库存闸门(补发{1000000}): 通过={ok_inv} 说明={inv_msg}")
-assert ok_inv is False
-print("✅ 库存不足 -> 拦截补发")
 
-# 正常数量应通过（若库存充足）
-if inv and inv["available"] > 0:
-    small = Action(ActionType.REISSUE, {"qty": 1, "order_id": order.order_id}, RiskLevel.HIGH)
+# 数量恰好超过可用库存 -> 应被库存闸门拦截
+if inv and inv["available"] >= 1:
+    over_qty = int(inv["available"]) + 1
+    big = Action(ActionType.REISSUE,
+                 {"qty": over_qty, "order_id": order.order_id, "sku": sku}, RiskLevel.HIGH)
+    ok_inv, inv_msg = agent._inventory_gate(big, order)
+    print(f"库存闸门(补发{over_qty} > 可用{inv['available']}): 通过={ok_inv} 说明={inv_msg}")
+    assert ok_inv is False
+    print("✅ 库存不足 -> 拦截补发（真库存数量比较，不是绝对上限）")
+
+    small = Action(ActionType.REISSUE,
+                   {"qty": 1, "order_id": order.order_id, "sku": sku}, RiskLevel.HIGH)
     ok_inv2, inv_msg2 = agent._inventory_gate(small, order)
     print(f"库存闸门(补发1): 通过={ok_inv2} 说明={inv_msg2}")
+    assert ok_inv2 is True
+
+# 多 SKU 订单：无法确定 SKU -> 保守转人工（正确行为）
+multi = next((o for o in ds.all_orders() if len({it["sku"] for it in o.items}) > 1), None)
+if multi:
+    amb = Action(ActionType.REISSUE, {"qty": 1, "order_id": multi.order_id}, RiskLevel.HIGH)
+    ok_amb, amb_msg = agent._inventory_gate(amb, multi)
+    print(f"多 SKU 订单({multi.order_id})保守处理: 通过={ok_amb} 说明={amb_msg}")
+    assert ok_amb is False
+    print("✅ 无法确定 SKU -> 保守转人工，不擅自放行")
 
 print()
 print("=" * 66)

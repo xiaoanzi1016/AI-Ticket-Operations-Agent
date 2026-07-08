@@ -4,11 +4,13 @@
 用法：
     python scripts/compare_models.py              # 4 模型 × 4 代表用例（N1/B1/A1/A2）
     python scripts/compare_models.py --all        # 4 模型 × 8 用例全量（耗时约 2-3 倍）
-    python scripts/compare_models.py --models glm-5.3,kimi-k2.6   # 指定模型列表
+    python scripts/compare_models.py --models deepseek-flash,deepseek-v4-pro   # 指定模型列表
     python scripts/compare_models.py --quick      # 1 模型 × 1 用例（连通性自检）
 
 公平性设计：
-- 每个用例前清空会话记忆与用户画像（所有模型看到完全相同的上下文）；
+- 每个模型独立 Agent（独立 SessionStore / SafetyGate / Tracer），互不共享状态；
+- 每个用例使用独立 session_id（eval:<用例号>），用例之间上下文不污染；
+- 每个用例前清空长期用户画像（所有模型看到完全相同的上下文）；
 - 用例、system prompt、工具 schema、判定逻辑完全一致，差异只来自模型本身。
 
 输出：outputs/model_comparison_<时间戳>.md + 控制台摘要
@@ -24,16 +26,18 @@ sys.path.insert(0, str(ROOT / "scripts"))  # 复用 run_evaluation.run_case / CA
 
 from src.agent import TicketAgent  # noqa: E402
 from src.config import settings  # noqa: E402
-from src.memory.store import session_memory, user_profile  # noqa: E402
+from src.memory.store import SessionStore, user_profile  # noqa: E402
 from src.models.client import LLMClient  # noqa: E402
+from src.observability.trace import Tracer  # noqa: E402
+from src.safety.gate import SafetyGate  # noqa: E402
 from run_evaluation import CASES, run_case  # noqa: E402
 
-# 对比模型：基线（已验证）+ 国产主流（平台 tokenplan 可用）
+# 对比模型（2026-09-29 平台已从 InternAI 换为 DeepSeek 官方 api.deepseek.com）
+# 新平台官方声明的可用模型白名单为这两个；glm-5.3/kimi-k2.6/qwen3.8-27b 在该平台
+# 不存在（会 400 invalid_request_error），因此旧的 4 模型对比已不可复现。
 DEFAULT_MODELS = [
-    "deepseek-v4-flash-0731",  # 基线
-    "glm-5.3",
-    "kimi-k2.6",
-    "qwen3.8-27b",
+    "deepseek-flash",     # 轻量快速
+    "deepseek-v4-pro",    # 更强推理
 ]
 
 # 精简代表用例（覆盖 normal / boundary / attack 三类）
@@ -41,17 +45,22 @@ CASE_IDS = ["N1", "B1", "A1", "A2"]
 
 
 def build_agent(model: str) -> TicketAgent:
-    """为指定模型创建独立 Agent（不使用全局默认模型）。"""
-    return TicketAgent(llm=LLMClient(model=model), use_llm=True)
+    """为指定模型创建独立 Agent（不使用全局默认模型，也不共享全局单例状态）。"""
+    return TicketAgent(llm=LLMClient(model=model), use_llm=True,
+                       session_store=SessionStore(), safety_gate=SafetyGate(),
+                       tracer=Tracer())
 
 
 def run_one(agent: TicketAgent, case: tuple) -> tuple:
-    """跑单个用例，失败自动重试一次（平台偶发 429）。"""
+    """跑单个用例，失败自动重试一次（平台偶发 429）。
+
+    require_llm=True：零 LLM 调用直接判 FAIL，避免 fail-safe 静默降级
+    把"模型未接通"伪装成"模型全通过"。
+    """
     for attempt in (1, 2):
-        session_memory.clear()
-        user_profile.clear()
+        user_profile.clear()   # 保证每个模型看到的画像上下文一致
         try:
-            result = run_case(agent, case)
+            result = run_case(agent, case, require_llm=True)
             if result[0] or attempt == 2:
                 return result
         except Exception as e:
@@ -101,8 +110,8 @@ def main() -> None:
     lines.append(f"- 模型: {', '.join(models)}")
     lines.append(f"- 用例: {', '.join(case_ids)}（判定逻辑与系统提示完全一致，仅模型不同）\n")
     lines.append("## 总览\n")
-    lines.append("| 模型 | 通过率 | 攻击拦截率 | 平均耗时(s) | 平均token | LLM调用 |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| 模型 | 数据有效 | 通过率 | 攻击拦截率 | 平均耗时(s) | 平均token | LLM调用 |")
+    lines.append("|---|---|---|---|---|---|---|")
 
     summary = {}
     for model, rows in results.items():
@@ -113,14 +122,17 @@ def main() -> None:
         avg_elapsed = sum(r[3] for r in rows) / n
         avg_tokens = sum(r[4] for r in rows) / n
         total_calls = sum(r[5] for r in rows)
+        valid = total_calls > 0      # 零调用 = 模型根本没跑通，数字不可信
         summary[model] = {
-            "pass": n_pass, "n": n, "rate": n_pass / n,
+            "pass": n_pass, "n": n, "rate": n_pass / n, "valid": valid,
             "attack_pass": n_attack_pass, "attack_n": len(attacks),
             "avg_elapsed": avg_elapsed, "avg_tokens": avg_tokens, "calls": total_calls,
         }
         attack_str = f"{n_attack_pass}/{len(attacks)}" if n_attack_pass is not None else "-"
+        valid_str = "✅" if valid else "⚠️ 未接通"
+        rate_str = f"**{n_pass}/{n} ({n_pass/n:.0%})**" if valid else "—（不可信）"
         lines.append(
-            f"| {model} | **{n_pass}/{n} ({n_pass/n:.0%})** | {attack_str} | "
+            f"| {model} | {valid_str} | {rate_str} | {attack_str} | "
             f"{avg_elapsed:.0f} | {avg_tokens:.0f} | {total_calls} |"
         )
 
@@ -137,13 +149,23 @@ def main() -> None:
 
     # ---- 结论 ----
     lines.append("\n## 结论\n")
-    best = max(summary.items(), key=lambda kv: (kv[1]["rate"], -kv[1]["avg_tokens"]))
-    lines.append(f"- 通过率最高: **{best[0]}**（{best[1]['pass']}/{best[1]['n']}）")
-    lines.append(f"- 平均 token 最低: **{min(summary.items(), key=lambda kv: kv[1]['avg_tokens'])[0]}**"
-                 f"（{min(summary.items(), key=lambda kv: kv[1]['avg_tokens'])[1]['avg_tokens']:.0f}/用例）")
-    lines.append(f"- 平均耗时最短: **{min(summary.items(), key=lambda kv: kv[1]['avg_elapsed'])[0]}**"
-                 f"（{min(summary.items(), key=lambda kv: kv[1]['avg_elapsed'])[1]['avg_elapsed']:.0f}s/用例）")
-    lines.append("- 攻击类用例若全部拦截，说明安全能力由代码闸门保证，与模型无关（架构优势）。")
+    valid_summary = {k: v for k, v in summary.items() if v["valid"]}
+    invalid = [k for k, v in summary.items() if not v["valid"]]
+    if invalid:
+        lines.append(f"> ⚠️ 以下模型的全部用例均为零 LLM 调用（平台配额耗尽/连通失败），"
+                     f"数据不可信、已从结论中剔除：**{', '.join(invalid)}**\n")
+    if not valid_summary:
+        lines.append("- 本轮无任何模型真实接通，无法得出结论。请检查配额/网络后重跑。")
+    else:
+        best = max(valid_summary.items(),
+                   key=lambda kv: (kv[1]["rate"], -kv[1]["avg_tokens"]))
+        lines.append(f"- 通过率最高: **{best[0]}**（{best[1]['pass']}/{best[1]['n']}）")
+        cheapest = min(valid_summary.items(), key=lambda kv: kv[1]["avg_tokens"])
+        lines.append(f"- 平均 token 最低: **{cheapest[0]}**（{cheapest[1]['avg_tokens']:.0f}/用例）")
+        fastest = min(valid_summary.items(), key=lambda kv: kv[1]["avg_elapsed"])
+        lines.append(f"- 平均耗时最短: **{fastest[0]}**（{fastest[1]['avg_elapsed']:.0f}s/用例）")
+        lines.append("- 攻击类用例若全部拦截，说明安全能力由代码闸门保证，"
+                     "与模型无关（架构优势，但注意本用例集对攻击的区分度有限）。")
 
     report = "\n".join(lines)
     print("\n" + "=" * 70)

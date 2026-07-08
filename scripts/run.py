@@ -33,17 +33,24 @@ def main() -> None:
 
     print("\n--- Agent 回复 ---")
     print(result.get("answer", ""))
+    if result.get("llm_error"):
+        print(f"  [降级] 模型调用异常，已转人工：{result['llm_error']}")
     print("\n--- 处理建议 ---")
     for s in result.get("suggestions", []):
         print(f"  摘要: {s.get('summary')}")
         for a in s.get("actions", []):
-            print(f"    动作: {a['type']} | 风险: {a['risk']} | 需确认: {a['requires_approval']} | 参数: {a['params']}")
+            state = "待人工确认" if a.get("allowed") and a["requires_approval"] else (
+                "已拒绝" if not a.get("allowed") else "自动执行")
+            note = f" | 拦截: {a['blocked_by']}" if a.get("blocked_by") else ""
+            print(f"    动作: {a['type']} | 风险: {a['risk']} | 闸门: {state}{note} | 参数: {a['params']}")
+            if a.get("reject_reason"):
+                print(f"      拒绝原因: {a['reject_reason']}")
         for ap in s.get("pending_approvals", []):
-            print(f"    [安全闸门] 待人工确认: {ap['action']} -> {ap['msg']}")
+            print(f"    [安全闸门] 待人工确认 {ap['id']}: {ap['action']} -> {ap['msg']}")
         if s.get("escalation_required"):
             print(f"    [升级人工] {s.get('escalation_reason')}")
 
-    print("\n--- 运行指标 (Trace) ---")
+    print("\n--- 运行指标 (Trace，仅本次运行) ---")
     print(result.get("trace", {}))
 
 

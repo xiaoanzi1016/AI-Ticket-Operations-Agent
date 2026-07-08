@@ -33,6 +33,9 @@ class LLMClient:
         self.total_calls = 0
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        # 最近一次工具调用响应里的思维链内容（DeepSeek 等"思考模式"模型的必需回传字段）。
+        # 见 chat_with_tools 的说明 —— 不回传会被服务端判 400。
+        self.last_reasoning_content: Optional[str] = None
 
     def usage_stats(self) -> dict:
         """返回累计 token 用量统计。"""
@@ -82,6 +85,16 @@ class LLMClient:
         返回 (content, tool_call)。
         - tool_call 非空时，说明模型请求调用某个工具，由 agent 层执行。
         - 两字段通常会有一个为 None。
+
+        关于 `last_reasoning_content`（重要，踩过的坑）：
+        思考模式模型（如 deepseek-v4-flash）在返回 tool_calls 时，会同时给出
+        `reasoning_content`（思维链）。**下一轮把这个 assistant 消息发回去时，
+        必须原样带上 reasoning_content**，否则服务端直接判 400：
+            "The `reasoning_content` in the thinking mode must be passed back to the API."
+        表现是"第一轮工具调用正常，第二轮必失败"，而 agent 层有 fail-safe 会
+        降级成"转人工"，看起来像是模型自己不想干活 —— 很容易被误判。
+        这里把思维链暂存到实例属性上，由 agent 层在拼 assistant 消息时取用。
+        返回值签名保持 (content, tool_call) 二元组不变，不破坏既有调用方与测试桩。
         """
         client = self._client()
         resp = client.chat.completions.create(
@@ -92,6 +105,12 @@ class LLMClient:
         )
         self._record_usage(resp)
         msg = resp.choices[0].message
+        # openai SDK 对非标准字段走 model_extra；两种取法都试一遍，兼容不同 SDK 版本
+        reasoning = getattr(msg, "reasoning_content", None)
+        if reasoning is None:
+            extra = getattr(msg, "model_extra", None) or {}
+            reasoning = extra.get("reasoning_content")
+        self.last_reasoning_content = reasoning or None
         tool_call = None
         if msg.tool_calls:
             tc = msg.tool_calls[0]

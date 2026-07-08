@@ -136,6 +136,40 @@ class UserProfileMemory:
         return text[:max_chars]
 
 
-# 全局实例（MVP：单用户演示；生产换 session/user 维度的持久化存储）
-session_memory = SessionMemory()
+class SessionStore:
+    """按 session_id 分桶的会话记忆容器。
+
+    为什么要它：原实现把会话记忆做成**全局单例**，`agent.run()` 无条件把整个
+    历史注入 messages —— 张三的对话会出现在李四的上下文里（跨客户串台）。
+    改为按 session 分桶后，不同客户/不同会话互不可见。
+
+    分桶键约定（见 `TicketAgent.run`）：未显式传 session_id 时用 `cust:<客户名>`，
+    评测场景用 `eval:<用例号>`，保证用例之间也不互相污染。
+    """
+
+    def __init__(self, ttl: int | None = None, max_entries: int = 20) -> None:
+        self._ttl = ttl
+        self._max_entries = max_entries
+        self._buckets: dict[str, SessionMemory] = {}
+
+    def get(self, session_id: str) -> SessionMemory:
+        """取（或惰性创建）某个会话的记忆桶。"""
+        sid = str(session_id or "default")
+        if sid not in self._buckets:
+            self._buckets[sid] = SessionMemory(ttl=self._ttl, max_entries=self._max_entries)
+        return self._buckets[sid]
+
+    def clear(self, session_id: str | None = None) -> None:
+        """清空指定会话；不传则清空全部（测试/评测隔离用）。"""
+        if session_id is None:
+            self._buckets.clear()
+        else:
+            self._buckets.pop(str(session_id), None)
+
+    def sessions(self) -> list[str]:
+        return list(self._buckets)
+
+
+# 全局实例（MVP：单进程演示；生产可换 Redis，按 session_id 存 hash）
+session_store = SessionStore()
 user_profile = UserProfileMemory()

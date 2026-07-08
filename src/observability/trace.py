@@ -63,12 +63,28 @@ class Tracer:
     def records(self) -> list[TraceRecord]:
         return list(self._records)
 
+    def offset(self) -> int:
+        """取当前记录数作为游标（用于按次统计）。"""
+        return len(self._records)
+
     def summary(self) -> dict:
-        """汇总指标，供评测/报告使用。"""
-        total = len(self._records)
-        ok = sum(1 for r in self._records if r.ok)
-        denied = sum(1 for r in self._records if r.decision == "denied")
-        avg_latency = sum(r.latency_ms for r in self._records) / total if total else 0.0
+        """汇总全部记录（累计口径，仅用于全局统计）。"""
+        return self._summarize(self._records)
+
+    def summary_since(self, offset: int) -> dict:
+        """只汇总 offset 之后的记录 —— 单次 run 的真实指标。
+
+        注意：不要用 summary() 当作单次运行指标，它会把历史记录一起算进去，
+        导致 total_calls / avg_latency 随运行次数持续虚增。
+        """
+        return self._summarize(self._records[offset:])
+
+    @staticmethod
+    def _summarize(records: list[TraceRecord]) -> dict:
+        total = len(records)
+        ok = sum(1 for r in records if r.ok)
+        denied = sum(1 for r in records if r.decision == "denied")
+        avg_latency = sum(r.latency_ms for r in records) / total if total else 0.0
         return {
             "total_calls": total,
             "success_rate": (ok / total) if total else 0.0,
@@ -77,4 +93,5 @@ class Tracer:
         }
 
 
+# 默认 Tracer（单进程演示用；多租户场景应由 AgentContext 注入独立实例）
 tracer = Tracer()
