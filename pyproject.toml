@@ -23,7 +23,10 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+# 代码以 `from src.xxx import ...` 方式导入，因此包根是项目根目录，
+# 需要把 src 当作包（src/__init__.py 存在）一起打包。
+# 原配置 where=["src"] 会把 agent/domain/... 当成顶层包，pip install . 会打出坏包。
+include = ["src*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -5,5 +5,27 @@ openpyxl>=3.1.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
 
+# 持久化层（Phase 1）：任务/工具执行记录落 SQLite
+# 说明：需求原定锁定 2.0.36。实测在 Python 3.14 下 2.0.36 无法解析
+#       `Mapped[str | None]` 注解（typing 内部 API 变更，抛 TypeError），
+#       需 >= 2.0.44 才兼容 3.14。若运行环境固定 Python 3.11，2.0.36 同样可用。
+sqlalchemy>=2.0.36,<2.1.0
+
+# ---- Web 服务层（Phase 2）----
+# 把 Agent 包装成 HTTP 服务：提交任务 / 查询结果 / 取消任务
+fastapi>=0.115.0                     # Web 框架（自带 OpenAPI 文档，见 /docs）
+uvicorn[standard]>=0.30.0            # ASGI 服务器（standard 附带 uvloop/httptools/watchfiles）
+python-multipart>=0.0.9              # FastAPI 解析 multipart/form-data —— 文件上传必需
+pydantic-settings>=2.0.0             # 配置管理：环境变量 / .env + 类型校验
+
+# ---- 测试 ----
+# Phase 2 的接口测试用 fastapi.testclient，其底层依赖 httpx
+httpx>=0.27.0
+
+# ---- RAG 层（历史工单案例检索）----
+# 说明：**零新增第三方依赖**。实现基于 SQLite 内建的 FTS5 全文检索模块
+#      （见 src/memory/fts_store.py），不需要 chromadb / torch / 模型文件，
+#      离线环境开箱可用。检索走标准库 sqlite3 直连业务库 data/agent_operations.db。
+
 # 可选：评测/报告
 matplotlib>=3.8.0

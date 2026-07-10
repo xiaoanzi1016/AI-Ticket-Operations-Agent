@@ -10,8 +10,11 @@ venv/
 env/
 
 # 环境变量
+# 说明：.env.* 会连 .env.example 一起忽略掉，所以必须显式放行它 ——
+# 样例文件是要进版本库的（新同学照着它建 .env），真实 .env 才不能进。
 .env
 .env.*
+!.env.example
 
 # 日志
 logs/
@@ -22,10 +25,27 @@ data/*.xlsx
 data/*.csv
 !data/mock/
 
+# 持久化数据库（Phase 1）：本地运行产生的审计留痕，不入版本库
+data/agent_operations.db
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# 测试/工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
 # 运行产物
 outputs/
 *.tmp
 *.temp
+
+# Web 服务（Phase 2）：上传文件默认落在系统临时目录，不占项目空间；
+# 这里兜住"有人显式把 UPLOAD_TEMP_DIR 指到项目内"的情况。
+uploads/
+.uploads/
 
 # IDE
 .vscode/
