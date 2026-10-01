@@ -24,6 +24,8 @@ logs/
 data/*.xlsx
 data/*.csv
 !data/mock/
+# 演示数据重标定前的原始备份（见 scripts/rescale_mock_timeline.py）
+data/mock/*.orig.bak
 
 # 持久化数据库（Phase 1）：本地运行产生的审计留痕，不入版本库
 data/agent_operations.db

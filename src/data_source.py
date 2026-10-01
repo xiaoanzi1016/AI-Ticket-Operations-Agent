@@ -242,13 +242,16 @@ class DataSource:
         """
         self.load()
         cutoff = None
+        upper: Optional[float] = None
         if days is not None:
             try:
                 n = int(days)
             except (TypeError, ValueError):
                 n = 30
             if n > 0:
-                cutoff = time.time() - n * 86400
+                now = time.time()
+                cutoff = now - n * 86400
+                upper = now          # 双侧区间：未来日期不算"最近发生"
 
         result: list[Return] = []
         for r in self._returns:
@@ -256,7 +259,7 @@ class DataSource:
                 continue
             if sku and r.sku != str(sku).strip():
                 continue
-            if cutoff is not None and not self._after(r.created_at, cutoff):
+            if cutoff is not None and not self._after(r.created_at, cutoff, upper):
                 continue
             result.append(r)
         # CSV 里没有稳定的 id 可排序，退而用申请时间倒序（无时间的排最后）
@@ -264,19 +267,28 @@ class DataSource:
         return result
 
     @staticmethod
-    def _after(created_at: str, cutoff_ts: float) -> bool:
-        """判断字符串时间是否晚于某个 Unix 时间戳（解析失败按 True 处理）。
+    def _after(created_at: str, cutoff_ts: float,
+               upper_ts: Optional[float] = None) -> bool:
+        """判断字符串时间是否落在 [cutoff_ts, upper_ts] 区间内（解析失败按 True 处理）。
 
         为什么解析失败返回 True：宁可多带一条记录给风控看，
         也不要因为一条脏时间就把本该被关注的退货记录静默丢掉。
+
+        upper_ts: 上界（"现在"）。原实现只有下界，于是"申请时间在未来"的记录
+                  也会被当成"最近发生"统计进来。必须与 crud.get_returns 的口径
+                  保持一致，否则同一条诉求在"读库"和"降级读 CSV"两条通路上
+                  会算出不一样的退货率 —— 这种不一致极难排查。
         """
         if not created_at:
             return True
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S"):
             try:
-                return time.mktime(time.strptime(created_at.strip(), fmt)) >= cutoff_ts
+                ts = time.mktime(time.strptime(created_at.strip(), fmt))
             except ValueError:
                 continue
+            if upper_ts is not None and ts > upper_ts:
+                return False
+            return ts >= cutoff_ts
         return True
 
     def get_customer_return_rate(self, customer: str, days: int | None = 30) -> float:
@@ -290,25 +302,29 @@ class DataSource:
         if not name:
             return 0.0
         cutoff = None
+        upper: Optional[float] = None
         if days is not None:
             try:
                 n = int(days)
             except (TypeError, ValueError):
                 n = 30
             if n > 0:
-                cutoff = time.time() - n * 86400
+                now = time.time()
+                cutoff = now - n * 86400
+                upper = now
 
         self.load()
         orders = [o for o in self._orders if o.customer == name]
         if cutoff is not None:
-            orders = [o for o in orders if self._after(o.created_at, cutoff)]
+            orders = [o for o in orders if self._after(o.created_at, cutoff, upper)]
         if not orders:
             return 0.0
 
         my_order_ids = {o.order_id for o in orders}
         returned_ids = {
             r.order_id for r in self._returns
-            if r.order_id in my_order_ids and (cutoff is None or self._after(r.created_at, cutoff))
+            if r.order_id in my_order_ids
+            and (cutoff is None or self._after(r.created_at, cutoff, upper))
         }
         return round(min(len(returned_ids), len(my_order_ids)) / len(my_order_ids), 4)
 

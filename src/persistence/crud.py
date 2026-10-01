@@ -644,10 +644,14 @@ def get_returns(db: Session, customer: str | None = None, sku: str | None = None
     参数：
         customer: 收货人（精确匹配）。None 表示不限。
         sku:      商品编码（精确匹配）。None 表示不限。
-        days:     只取"申请时间在最近 N 天内"的记录。
-                  **None 表示不限时间**（重要：迁移进来的演示数据申请时间在
-                  2026-09 ~ 2027-12，相对"今天"是未来日期，用 days=30 会一条都
-                  查不到 —— 需要看全量时显式传 days=None）。
+        days:     只取"申请时间落在最近 N 天内"的记录。**None 表示不限时间**。
+
+                 注意区间是**双侧**的：[now-N天, now]。
+                 原实现只有下界（`created_at >= now-N天`），于是"申请时间在未来"
+                 的记录也会被算进"最近 N 天" —— 而演示数据里 99% 的退货单都是
+                 未来日期，结果"近 30 天"实际等于"全量"，时间维度彻底失效。
+                 未来日期的退货单是脏数据，应在迁移阶段就发现（见
+                 scripts/migrate_csv_to_db.py 的数据质量检查）。
 
     返回：
         list[Return]，按申请时间倒序（最近的在前）。
@@ -666,7 +670,11 @@ def get_returns(db: Session, customer: str | None = None, sku: str | None = None
         except (TypeError, ValueError):
             n = 30
         if n > 0:
-            stmt = stmt.where(Return.created_at >= _now() - timedelta(days=n))
+            now = _now()
+            # 双侧区间：既不能早于窗口起点，也不能晚于"现在"。
+            # 少了上界，"未来日期"的退货记录会被当成"最近发生"统计进来。
+            stmt = stmt.where(Return.created_at >= now - timedelta(days=n),
+                              Return.created_at <= now)
     stmt = stmt.order_by(Return.created_at.desc(), Return.id.desc())
     return [_row_to_return(r) for r in db.execute(stmt).scalars().all()]
 
