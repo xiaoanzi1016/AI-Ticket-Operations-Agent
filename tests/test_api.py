@@ -83,10 +83,18 @@ def _gate_outcome(detail: dict) -> dict:
 # ----------------------------------------------------------------------
 @pytest.fixture(scope="module")
 def client():
-    """整个模块共用的 TestClient（进入 with 才会触发 lifespan：建表 + 起 Worker）。"""
-    from src.api.main import app
+    """整个模块共用的 TestClient（进入 with 才会触发 lifespan：建表 + 起 Worker）。
 
-    with TestClient(app) as c:
+    headers 里带上测试 Token：conftest 设了 API_AUTH_TOKEN，
+    任务接口是要求鉴权的，不带就全是 401。
+    """
+    from src.api.main import app
+    from src.api.settings import api_settings
+
+    headers = {}
+    if api_settings.api_auth_token:
+        headers["Authorization"] = f"Bearer {api_settings.api_auth_token}"
+    with TestClient(app, headers=headers) as c:
         yield c
 
 
@@ -329,11 +337,14 @@ def test_cancel_running_task(client, monkeypatch):
         """模拟跑很久的 Agent：每 50ms 检查一次取消标志。"""
 
         def run(self, user_input, customer="访客", session_id=None,
-                task_id=None, cancel_check=None):
+                task_id=None, cancel_check=None, on_completed=None):
             for _ in range(200):                      # 最多 10 秒
                 if cancel_check is not None and cancel_check():
                     raise TaskCancelled("测试：被取消")
                 time.sleep(0.05)
+            # 真 Agent 是在写 completed **之前**调用收尾回调的，测试桩保持同一契约
+            if on_completed is not None:
+                on_completed()
             _finalize(task_id, "completed", summary={"answer": "本不该跑到这里"})
             return {"answer": "本不该跑到这里", "task_id": task_id}
 
@@ -364,8 +375,10 @@ def test_cancel_queued_task(client, monkeypatch):
 
     class SlowAgent:
         def run(self, user_input, customer="访客", session_id=None,
-                task_id=None, cancel_check=None):
+                task_id=None, cancel_check=None, on_completed=None):
             time.sleep(1.0)
+            if on_completed is not None:
+                on_completed()
             _finalize(task_id, "completed", summary={"answer": "done"})
             return {"answer": "done", "task_id": task_id}
 
@@ -397,3 +410,32 @@ def test_agent_run_signature_still_backward_compatible():
     assert list(params)[:3] == ["self", "user_input", "customer"]
     for name in ("task_id", "cancel_check"):
         assert params[name].default is None      # 新增参数必须都是可选的
+    assert params["on_completed"].default is None
+
+
+# ----------------------------------------------------------------------
+# 7) 鉴权
+# ----------------------------------------------------------------------
+def test_bad_token_rejected(client):
+    """配了 API_AUTH_TOKEN 时，错误 Token 必须被拦在业务之外（401）。
+
+    注意用的是**同一个 client**（模块级单例）：另建 TestClient 会再启一次
+    lifespan，把后台 Worker 反复拉起/停掉，容易互相干扰。
+    请求级 headers 会覆盖 client 的默认 header。
+    """
+    from src.api.settings import api_settings
+
+    if not api_settings.api_auth_token:
+        pytest.skip("未配置 API_AUTH_TOKEN，鉴权未启用")
+
+    r = client.get("/api/v1/tasks/recent",
+                   headers={"Authorization": "Bearer definitely-wrong"})
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "invalid_token"
+
+
+def test_health_stays_public(client):
+    """探活接口必须免鉴权 —— docker healthcheck / K8s 探针不会带 Token。"""
+    r = client.get("/health", headers={"Authorization": "Bearer whatever"})
+    assert r.status_code == 200
+    assert r.json()["status"] in ("healthy", "degraded")

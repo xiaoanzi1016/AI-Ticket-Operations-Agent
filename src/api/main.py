@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from src.api.auth import warn_if_auth_disabled
 from src.api.deps import get_worker
 from src.api.models import ErrorResponse
 from src.api.routers import system, tasks
@@ -69,6 +70,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     init_db()
     log.info("API 启动中：db=%s", DB_PATH)
+    # 没配 API_AUTH_TOKEN 时明确告警（见 src/api/auth.py 的说明）
+    warn_if_auth_disabled()
     worker = get_worker()
     await worker.start()
     log.info("API 已就绪：workers=%d mock=%s", api_settings.workers,

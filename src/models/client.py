@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from src.config import settings
+from src.config import is_placeholder_key, settings
 from src.logger import log
 
 
@@ -65,8 +65,13 @@ class LLMClient:
             raise RuntimeError(
                 "未安装 openai 依赖。请执行: pip install -r requirements.txt"
             ) from e
-        if not self.api_key or self.api_key == "sk-xxx":
-            raise RuntimeError("未配置 MODEL_API_KEY。请在 .env 中填写。")
+        # 占位值（.env.example 里的 sk-your-key-here 之类）一律视为"没配密钥"，
+        # 避免照抄样例文件后静默进入真实模型模式。见 config.is_placeholder_key。
+        if is_placeholder_key(self.api_key):
+            raise RuntimeError(
+                "未配置有效的 MODEL_API_KEY（当前是空值或 .env.example 里的占位值）。"
+                "请在 .env 中填写真实密钥，或设 AGENT_FORCE_MOCK=true 走离线演示模式。"
+            )
         return OpenAI(api_key=self.api_key, base_url=self.base_url)
 
     def chat(self, messages: list[dict], tools: Optional[list[dict]] = None) -> str:

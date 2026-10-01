@@ -53,6 +53,27 @@ except ImportError:  # 未装 python-dotenv 时静默降级
     pass
 
 
+# ---- 密钥占位值识别 ----------------------------------------------------
+# 为什么需要：.env.example 里的占位值是 `sk-your-key-here`，而原来的判定
+# 只排除了字面量 "sk-xxx"。照 README 执行 `cp .env.example .env` 之后，
+# 占位值会被当成**已配置好的真密钥**，于是应用静默从 mock 演示模式切到
+# 真实模型模式，每个任务都去调一个必然失败的模型、再被 fail-safe 降级成
+# "转人工" —— 表现出来像"Agent 什么都不干只会转人工"，而且很难归因。
+# 这里改成按特征子串匹配，覆盖常见的占位写法。
+_PLACEHOLDER_KEY_HINTS: tuple[str, ...] = (
+    "sk-xxx", "your-key", "your_key", "yourkey", "xxx", "changeme",
+    "placeholder", "todo", "replace-me", "replace_me", "example", "fill",
+)
+
+
+def is_placeholder_key(key: Optional[str]) -> bool:
+    """判断一个密钥是不是"还没填"的占位值（空值也算）。"""
+    k = str(key or "").strip().lower()
+    if not k:
+        return True
+    return any(hint in k for hint in _PLACEHOLDER_KEY_HINTS)
+
+
 @dataclass
 class Settings:
     """集中式配置，避免散落魔法数字。"""
@@ -128,7 +149,8 @@ class Settings:
 
     @property
     def has_model_key(self) -> bool:
-        return bool(self.model_api_key) and self.model_api_key != "sk-xxx"
+        """是否配置了可用的模型密钥（占位值一律视为"没配"）。"""
+        return not is_placeholder_key(self.model_api_key)
 
 
 def _resolve_db_path(cfg: "Settings") -> Path:

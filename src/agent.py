@@ -142,6 +142,32 @@ _ANONYMOUS_CUSTOMERS = frozenset({
 })
 
 
+def _within_days(created_at: str, days: int) -> bool:
+    """判断一个 "%Y-%m-%d ..." 时间串是否落在最近 days 天内。
+
+    为什么需要它：风控日志里原本会把"退货率""退货单数""订单总数"三个数
+    拼在一句话里，但它们来自三套口径 —— 退货率按窗口算、退货单数按窗口算、
+    订单总数却是客户的**全部**订单。结果日志会出现
+    "退货率 100%（1/6）"这种自己都算不平的数字，排查时非常误导。
+    这里把订单数也统一到窗口口径上。
+
+    解析失败按 True（与 data_source._after 同款取舍）：宁可多算一单，
+    也不要因为一条脏时间把客户的订单静默丢掉。
+    """
+    s = str(created_at or "").strip()
+    if not s:
+        return True
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+        try:
+            ts = datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+        now = datetime.now()
+        return now - timedelta(days=days) <= ts <= now
+    return True
+
+
 class TicketAgent:
     def __init__(self, llm: Optional[LLMClient] = None, mock: bool = False,
                  use_llm: bool = False, session_store: Optional[SessionStore] = None,
@@ -298,7 +324,8 @@ class TicketAgent:
     def run(self, user_input: str, customer: str = "访客",
             session_id: Optional[str] = None,
             task_id: Optional[str] = None,
-            cancel_check: Optional[Callable[[], bool]] = None) -> dict:
+            cancel_check: Optional[Callable[[], bool]] = None,
+            on_completed: Optional[Callable[[], None]] = None) -> dict:
         """处理一条工单 / 用户诉求，返回结构化结果（并留痕落库）。
 
         大白话：这是对外的"处理一条诉求"入口。它先开一张任务小票、把编号报给用户，
@@ -314,6 +341,14 @@ class TicketAgent:
                    避免"API 建一条、Agent 又建一条"的双份台账。
         cancel_check: PHASE 2 新增。协作式取消标志位检查函数，返回 True 表示
                  该任务已被要求取消。为 None 时永不取消（原有行为完全不变）。
+
+        on_completed: 收尾回调，在**写入 completed 终态之前**执行。
+                 Web 层用它删除本次上传的临时文件。
+                 为什么必须在写终态之前：调用方靠轮询任务状态判断"做完了没有"。
+                 如果先把状态改成 completed 再去做清理，调用方一看到 completed
+                 就去读结果，此时临时文件还没删、案例库还没沉淀完 ——
+                 这正是 test_upload_temp_dir_cleaned 偶发失败的根因。
+                 回调自身抛异常只记 WARNING，不会把工单打成 failed。
 
         技术细节：主流程外面套 try/except 是为了保证"异常也必须落一条 failed"。
                   这里只做记录，异常仍原样抛出（不吞），既有行为不变。
@@ -342,11 +377,22 @@ class TicketAgent:
             self._finish_task(task_id, "failed",
                               error_message=f"{type(e).__name__}: {e}")
             raise
-        self._finish_task(task_id, "completed", result=result)
         # RAG 增强：把这条处理完的工单沉淀进案例库，作为未来检索的素材。
-        # 放在 _finish_task 之后、return 之前 —— 落库成功与否都不影响返回值；
         # 内部自带降级（库不可用/写失败只打日志），不会让 run() 抛异常。
+        #
+        # 注意顺序：**必须排在写终态之前**。原实现是"先落 completed、再沉淀案例"，
+        # 于是调用方（含 tests/test_api.py 的状态轮询）会在案例入库前就看到
+        # completed —— 终态本该代表"一切都做完了"，这样发信号是不成立的。
         self._index_case(user_input, customer, result)
+
+        # 收尾回调（Web 层用它删掉本次上传的临时文件）——同样排在终态之前，理由同上。
+        if on_completed is not None:
+            try:
+                on_completed()
+            except Exception as e:  # 收尾失败不该把工单打成 failed
+                log.warning("任务收尾回调失败（不影响处理结果）: %s", e)
+
+        self._finish_task(task_id, "completed", result=result)
         return result
 
     # ------------------------------------------------------------------
@@ -545,7 +591,7 @@ class TicketAgent:
         # 为什么单独放一个：mock 模式下一轮循环就 break 了，若只放在循环里，
         # mock 任务几乎没有可取消的窗口；这里是所有模式都会经过的必经之路。
         self._raise_if_cancelled(cancel_check)
-        suggestions = self._build_suggestions(user_input, session_id=sid)
+        suggestions = self._build_suggestions(user_input, session_id=sid, customer=customer)
         result["suggestions"] = suggestions["suggestions"]
         result["pending_approvals"] = suggestions["pending_approvals"]
         result["gate_outcomes"] = suggestions["gate_outcomes"]
@@ -705,7 +751,10 @@ class TicketAgent:
             # 退货"次数"按**去重原订单号**计：一个订单退多件只算一单，
             # 与退货率的口径保持一致，否则次数会虚高。
             my_order_ids = {o.order_id for o in orders
-                            if str(getattr(o, "customer", "") or "").strip() == customer}
+                            if str(getattr(o, "customer", "") or "").strip() == customer
+                            # 订单数也要按**窗口**口径统计，才能和退货率、退货单数对得上
+                            and _within_days(getattr(o, "created_at", ""),
+                                             _RETURN_RISK_DAYS)}
             returned_order_ids = {r.order_id for r in recent_returns
                                   if r.order_id in my_order_ids}
             return_count = len(returned_order_ids)
@@ -776,11 +825,50 @@ class TicketAgent:
         return result
 
     # ------------------------------------------------------------------
-    def _build_suggestions(self, user_input: str, session_id: str = "") -> dict:
+    @staticmethod
+    def _pick_demo_order(data_source, customer: str):
+        """演示模式下挑一张订单（用户没给订单号时兜底用）。
+
+        为什么不能直接 `all_orders()[0]`：原实现抓数据源里第一张订单，
+        随后 `Ticket.customer` 又取 `order.customer` —— 于是调用方传进来的
+        customer 被完全忽略，工单记到了另一个客户名下。后果不是"显示不好看"：
+        退货风控会去查**那个无关客户**的退货历史并据此决定要不要升级人工，
+        用户画像也会记到别人头上（实测传 customer="张三"，风控对象却是"陶睿"）。
+
+        现在的行为：优先挑该客户名下的订单；客户名下没有订单时，
+        退而取第一张并打一条 WARNING，但**工单客户仍然是传入的 customer**，
+        不再被订单收货人覆盖。
+        """
+        try:
+            orders = data_source.all_orders() or []
+        except Exception as e:  # 数据源不可用就当作没有订单，不拖垮建议生成
+            log.warning("演示订单选取失败(%s)，按无订单处理", e)
+            return None
+        if not orders:
+            return None
+
+        name = str(customer or "").strip()
+        if not name:
+            return orders[0]
+        for o in orders:
+            if str(getattr(o, "customer", "") or "").strip() == name:
+                return o
+        # 该客户在这份数据里没有订单 —— 仍然挑一张演示，但明确留痕，
+        # 避免"演示看起来正常、其实查的是别人的单子"这种误会。
+        log.warning("演示模式：客户 %s 在数据源中没有订单，暂用订单 %s 演示"
+                    "（工单客户仍记为 %s）", name, orders[0].order_id, name)
+        return orders[0]
+
+    # ------------------------------------------------------------------
+    def _build_suggestions(self, user_input: str, session_id: str = "",
+                           customer: str = "访客") -> dict:
         """统一建议生成：解析关联订单 -> 构造 Ticket -> 退货风险检查 -> 生成建议 -> 过安全闸门。
 
         关联订单解析（MVP 规则）：从用户输入中匹配订单号（PO20260928-XXXXX），
         未提到订单号则从数据源取一个真实订单演示（标注 demo）。
+
+        customer 必须显式传入：工单客户**一律以调用方传进来的为准**，
+        不再由演示订单的收货人决定（原实现会张冠李戴，见 `_pick_demo_order`）。
 
         退货风险（业务规则）：见 `_check_return_risk`。命中"升级"规则时，
         本方法会跳过正常的建议生成逻辑，直接产出"升级人工"的建议。
@@ -794,8 +882,8 @@ class TicketAgent:
 
         demo_related = False
         if order is None and related_order_id is None:
-            # 演示模式：取数据源第一个真实订单
-            demo = data_source.all_orders()[0] if data_source.all_orders() else None
+            # 演示模式：挑一张真实订单来演示（优先挑当前客户名下的，见 _pick_demo_order）
+            demo = self._pick_demo_order(data_source, customer)
             if demo:
                 related_order_id = demo.order_id
                 order = demo
@@ -814,7 +902,7 @@ class TicketAgent:
 
         ticket = Ticket(
             ticket_id="T-" + (related_order_id or "NONE"),
-            customer=str(order.customer if order else "访客"),
+            customer=str(customer or "访客"),
             store=str(order.store if order else ""),
             issue_type=issue_type,
             description=user_input,

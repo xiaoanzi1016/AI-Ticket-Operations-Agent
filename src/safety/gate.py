@@ -32,6 +32,14 @@ _SAFE_AUTO_ACTIONS = {ActionType.QUERY, ActionType.SUGGEST, ActionType.ESCALATE}
 # 敏感动作（HIGH）必须人工确认
 _SENSITIVE_ACTIONS = {t for t, r in ACTION_RISK.items() if r == RiskLevel.HIGH}
 
+# 内存待办队列里"已终结"（approved / denied / executed）条目的保留上限。
+# 为什么需要它：原实现 `_pending` 只 append、从不移除，长跑的服务会一直堆，
+# 而且 get_request() 是线性扫描，列表越长越慢。
+# 为什么不是"一终结就移除"：刚批准的请求常常还要按 req_id 回查
+# （mark_executed、界面回显），立刻删掉会出现"刚批准完就查不到"。
+# 所以只在水位超过上限时批量归档 —— 见 SafetyGate._archive_terminal。
+_MAX_TERMINAL_PENDING: int = 500
+
 # 业务相对约束：订单状态必须处于可退款 / 可补发状态
 # （已取消、待付款、退款中 都不接受新的退款/补发）
 _REFUNDABLE_STATUSES = {"已付款待发货", "已发货", "已完成"}
@@ -247,6 +255,8 @@ class SafetyGate:
                 reason=action.reason,
             )
             self._pending.append(req)
+            # 水位过高时把已终结的条目归档掉，避免内存与扫描成本无限增长
+            self._archive_terminal()
             log.info("敏感动作进入二次确认: %s %s ticket=%s", req.req_id, action.type, ticket_id)
             return True, req, "动作已进入人工二次确认，等待审批"
 
@@ -272,11 +282,42 @@ class SafetyGate:
                 if r.status == "pending"
                 and (session_id is None or r.session_id == session_id)]
 
-    def approve(self, req_id: str, operator: str) -> tuple[bool, str]:
-        """人工批准敏感动作执行（注意：批准 ≠ 已执行，执行由 ActionExecutor 负责）。"""
+    def _archive_terminal(self) -> int:
+        """把已终结（非 pending）的确认请求移出内存待办队列，返回移除条数。
+
+        注意：清掉的只是"待办队列"里的历史条目。
+        **审计留痕（self._audit）是另一份数据，一条都不会少** ——
+        审计要回答的是"谁批的、批了什么"，那部分从第一次判定起就写进了 _audit。
+
+        已知限制（MVP）：_pending 仍在内存里，服务重启会丢失未处理的待确认项，
+        且 `_seq` 归零会让 AP-0001 重新出现。要彻底解决需要把这层落到数据库
+        （接口已按依赖注入设计，替换实现不影响调用方）。
+        """
+        if len(self._pending) <= _MAX_TERMINAL_PENDING:
+            return 0
+        before = len(self._pending)
+        self._pending = [r for r in self._pending if r.status == "pending"]
+        removed = before - len(self._pending)
+        if removed:
+            log.info("闸门：已归档 %d 条已终结的确认请求（待处理还剩 %d 条）",
+                     removed, len(self._pending))
+        return removed
+
+    def approve(self, req_id: str, operator: str,
+                session_id: str | None = None) -> tuple[bool, str]:
+        """人工批准敏感动作执行（注意：批准 ≠ 已执行，执行由 ActionExecutor 负责）。
+
+        session_id: 可选。传入时会校验该请求确实属于这个会话 ——
+                    多租户场景下"光知道 req_id 就能批准别人的退款"是不能接受的。
+                    不传时保持原有行为（单会话与内部调用兼容）。
+        """
         r = self.get_request(req_id)
         if r is None or r.status != "pending":
             return False, "确认请求不存在或已处理"
+        if session_id is not None and r.session_id != session_id:
+            log.warning("跨会话批准被拒绝: req=%s 属于会话 %r，操作方声称 %r",
+                        req_id, r.session_id, session_id)
+            return False, f"确认请求 {req_id} 不属于会话 {session_id}，拒绝批准"
         r.status = "approved"
         r.note = f"批准人: {operator}"
         self._audit.append(
@@ -286,11 +327,16 @@ class SafetyGate:
         log.info("人工批准: %s %s by %s", r.req_id, r.action.type, operator)
         return True, "已批准"
 
-    def deny(self, req_id: str, operator: str, reason: str) -> tuple[bool, str]:
-        """人工驳回敏感动作。"""
+    def deny(self, req_id: str, operator: str, reason: str,
+             session_id: str | None = None) -> tuple[bool, str]:
+        """人工驳回敏感动作（session_id 语义同 approve）。"""
         r = self.get_request(req_id)
         if r is None or r.status != "pending":
             return False, "确认请求不存在或已处理"
+        if session_id is not None and r.session_id != session_id:
+            log.warning("跨会话驳回被拒绝: req=%s 属于会话 %r，操作方声称 %r",
+                        req_id, r.session_id, session_id)
+            return False, f"确认请求 {req_id} 不属于会话 {session_id}，拒绝驳回"
         r.status = "denied"
         r.note = f"驳回人: {operator}, 原因: {reason}"
         self._audit.append(

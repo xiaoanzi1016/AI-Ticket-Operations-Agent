@@ -46,6 +46,8 @@ services:
       KEEP_UPLOAD_FILES: "${KEEP_UPLOAD_FILES:-false}"
       # 调试开关：设成 true 就完全不调大模型，适合离线演示
       AGENT_FORCE_MOCK: "${AGENT_FORCE_MOCK:-false}"
+      # 任务接口鉴权（生产必填；留空则不鉴权，启动会打 WARNING）
+      API_AUTH_TOKEN: "${API_AUTH_TOKEN:-}"
       CORS_ORIGINS: "${CORS_ORIGINS:-*}"
       # 时区：用环境变量而不是 compose 的 tz 键 —— 老版本 compose 不认 tz，
       # 会直接报 "Additional property tz is not allowed" 导致起不来。

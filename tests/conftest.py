@@ -28,4 +28,8 @@ _TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="agent-test-db-"))
 os.environ.setdefault("AGENT_DB_PATH", str(_TEST_DB_DIR / "agent_operations.db"))
 # PHASE 2：测试一律不调真实大模型（有 .env key 也不会被用上）
 os.environ.setdefault("AGENT_FORCE_MOCK", "1")
+# 接口鉴权：测试环境固定一个 Token，让任务接口走"已鉴权"分支。
+# 不设的话 verify_token 会直接放行，鉴权这条路径就永远覆盖不到 ——
+# 等于测试默认跑在"生产不会出现的配置"下。
+os.environ.setdefault("API_AUTH_TOKEN", "test-token")
 

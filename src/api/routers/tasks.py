@@ -36,6 +36,7 @@ from fastapi import (
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from src.api.auth import verify_token
 from src.api.dataset import UploadRejected, cleanup, save_uploads
 from src.api.deps import get_db, get_worker
 from src.api.models import (
@@ -51,7 +52,10 @@ from src.api.worker import TaskJob, TaskWorker
 from src.logger import log
 from src.persistence import crud
 
-router = APIRouter(prefix="/tasks", tags=["tasks"])
+# dependencies=[Depends(verify_token)]：整个业务的四个接口统一鉴权。
+# 挂在这里而不是全局中间件，是为了让 /health、/metrics 保持免鉴权（探针与监控要用）。
+# API_AUTH_TOKEN 未配置时 verify_token 直接放行（并已在启动时打 WARNING）。
+router = APIRouter(prefix="/tasks", tags=["tasks"], dependencies=[Depends(verify_token)])
 
 # 任务已结束（终态）的三种状态：不能再取消，也不会再变化
 _TERMINAL_STATUSES: set[str] = {"completed", "failed", "cancelled"}

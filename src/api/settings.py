@@ -106,6 +106,13 @@ class ApiSettings(BaseSettings):
     # 强制 mock：不调用真实大模型（离线演示 / 自动化测试用）。
     agent_force_mock: bool = False
 
+    # 任务接口的 Bearer Token（环境变量名 API_AUTH_TOKEN ——
+    # 与 api_host/api_port 同款前缀，pydantic-settings 按字段名取环境变量）。
+    # 留空 = 不鉴权（启动时打 WARNING，方便本地演示）；
+    # 一旦配置，/api/v1/tasks/* 全部强制校验。生产环境必须设置 ——
+    # 这些接口能读到客户姓名、订单号与金额，还能提交/取消任务、翻全量历史。
+    api_auth_token: str = ""
+
     # ---- CORS ----
     # 逗号分隔；"*" 表示允许任意来源（默认，方便后续接前端）
     cors_origins: str = "*"

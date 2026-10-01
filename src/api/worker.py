@@ -142,6 +142,14 @@ class TaskWorker:
         # 反正启动时队列本来就该是空的，重建没有任何副作用。
         self._queue = asyncio.Queue(maxsize=max(0, int(api_settings.max_queue_size)))
         self._agent = self._agent_factory()
+        if self._concurrency > 1:
+            # 把"名不副实"这件事说出来：配 WORKERS>1 目前只提升取任务并行度，
+            # 真正执行仍被 _run_lock 串行（任务级数据源要临时改写全局单例）。
+            # 不说的话很容易被当成"已经支持并发处理"。
+            log.warning("Worker 配置为 %d，但当前实现**执行阶段是串行的**"
+                        "（Agent/数据源依赖进程内单例）；多出来的协程只并行取任务。"
+                        "需要真并发请先让 Agent 无状态化并换外部队列。",
+                        self._concurrency)
         self._consumers = [
             asyncio.create_task(self._consume(i), name=f"agent-worker-{i}")
             for i in range(self._concurrency)
@@ -257,6 +265,10 @@ class TaskWorker:
                         session_id=job.session_id,
                         task_id=job.task_id,          # 复用 API 已建好的任务编号
                         cancel_check=flag.is_set,     # 协作式取消：Agent 到检查点自查
+                        # 收尾回调：Agent 会在写 completed **之前**调用它，
+                        # 保证调用方看到终态时，上传的临时文件已经删干净了
+                        #（清理原本在 _handle 的 finally 里，晚于终态，会形成竞态）。
+                        on_completed=lambda: cleanup_dataset(job.dataset),
                     )
                 log.info("任务处理完成 task_id=%s status=%s",
                          job.task_id, "cancelled" if result.get("cancelled") else "completed")
