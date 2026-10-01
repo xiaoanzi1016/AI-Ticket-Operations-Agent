@@ -30,7 +30,12 @@ include = ["src*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# 必须是 "."（项目根），不是 "src"。
+# 代码里全是 `from src.xxx import ...`，要能 import 到 src 这个包，
+# 需要的是**项目根目录**在 sys.path 上；写成 "src" 只会把 src/ 自身加进去，
+# 于是 `pytest tests/` 直接 ModuleNotFoundError: No module named 'src'
+#（用 `python -m pytest` 才碰巧能跑，因为那种调用方式会把 cwd 加进 sys.path）。
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

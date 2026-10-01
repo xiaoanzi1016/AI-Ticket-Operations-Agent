@@ -8,17 +8,24 @@ on:
 
 jobs:
   test:
-    runs-on: windows-latest
+    # 说明：原本只在 windows-latest 上跑。项目实际交付目标是 Linux 容器
+    #（Dockerfile 用 python:3.14-slim），只验 Windows 等于没验交付环境，
+    # 所以这里改成双系统矩阵。
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11"]
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.13"]
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}`n      uses: actions/setup-python@v5
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}`n        cache: 'pip'
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
 
     - name: Install dependencies
       run: |
@@ -26,22 +33,35 @@ jobs:
         pip install -r requirements.txt
 
     - name: Run tests
-      run: pytest tests/ -q --tb=short
+      # 用 python -m pytest 而不是裸 pytest：前者会把当前目录（项目根）
+      # 加进 sys.path，保证 `from src.xxx import ...` 能解析。
+      # 同时产出 junit xml，让下面归档步骤真正拿到东西
+      #（原配置里的 test-results/ 从来没有被生成过）。
+      run: python -m pytest tests/ -q --tb=short --junitxml=test-results/junit.xml
 
     - name: Upload coverage report
       if: always()
       run: |
         pip install pytest-cov
-        pytest tests/ --cov=src --cov-report=xml
+        python -m pytest tests/ --cov=src --cov-report=xml
       continue-on-error: true
 
     - name: Archive test results
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: test-results
+        name: test-results-${{ matrix.os }}-${{ matrix.python-version }}
         path: |
           test-results/
           coverage.xml
         retention-days: 7
 
+  docker:
+    # 交付形态是容器，镜像能构建出来才算过。只 build 不 push，
+    # 成本低但能挡住"Dockerfile 改坏了没人知道"。
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build image
+      run: docker build -t ai-ticket-operations-agent:ci .
