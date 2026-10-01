@@ -42,6 +42,9 @@
 - **工具即业务边界**：新增业务 = 新增工具，不改编排层。
 - `ToolRegistry` 统一注册，向外暴露 OpenAI 兼容的 function schema。
 - MVP 工具：`query_order` / `query_logistics` / `check_inventory` / `create_suggestion` / `escalate_ticket`（后两者写建议/升级，见 business_tools）。
+- **注意区分"注册给 LLM 的工具"与"内部函数"**：主循环里注册给模型的只有前三个**只读**工具；
+  `create_suggestion` / `escalate_ticket` 是编排层内部调用的函数，模型在能力层面
+  根本调不到（这是安全设计的一部分：写操作的入口不由模型掌握）。
 
 ### safety/ 安全层（核心差异化）
 - `SafetyGate.check()`：**动作类型白名单 → 参数校验 → 敏感动作转二次确认**。
