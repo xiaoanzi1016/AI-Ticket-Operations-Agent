@@ -38,6 +38,10 @@ data/*.db-shm
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+# 测试运行产物（CI 与本地按 CI 命令跑都会生成）
+.coverage
+coverage.xml
+test-results/
 
 # 运行产物
 outputs/

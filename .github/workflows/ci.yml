@@ -28,6 +28,9 @@ jobs:
         cache: 'pip'
 
     - name: Install dependencies
+      # requirements.txt 里已包含 pytest / pytest-cov，
+      # 不需要再单独装测试依赖（原先漏了 pytest，Run tests 直接报
+      # "No module named pytest"，四个矩阵任务全红）。
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
@@ -35,16 +38,12 @@ jobs:
     - name: Run tests
       # 用 python -m pytest 而不是裸 pytest：前者会把当前目录（项目根）
       # 加进 sys.path，保证 `from src.xxx import ...` 能解析。
-      # 同时产出 junit xml，让下面归档步骤真正拿到东西
-      #（原配置里的 test-results/ 从来没有被生成过）。
-      run: python -m pytest tests/ -q --tb=short --junitxml=test-results/junit.xml
-
-    - name: Upload coverage report
-      if: always()
-      run: |
-        pip install pytest-cov
-        python -m pytest tests/ --cov=src --cov-report=xml
-      continue-on-error: true
+      # 覆盖率与 junit xml 一次跑出来，避免为了统计再重复跑一遍全量测试
+      #（原来 Upload coverage report 那一步就是把测试跑了两遍）。
+      run: >
+        python -m pytest tests/ -q --tb=short
+        --cov=src --cov-report=xml --cov-report=term-missing:skip-covered
+        --junitxml=test-results/junit.xml
 
     - name: Archive test results
       if: always()
