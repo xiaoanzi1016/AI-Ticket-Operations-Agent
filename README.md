@@ -1,6 +1,27 @@
 # AI-Ticket-Operations-Agent
 
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.142-009688?logo=fastapi&logoColor=white)
+![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0-D71F00?logo=sqlalchemy&logoColor=white)
+![LLM](https://img.shields.io/badge/LLM-DeepSeek%20V4-4D6BFE)
+![Tests](https://img.shields.io/badge/tests-137%20passed-brightgreen)
+[![CI](https://github.com/xiaoanzi1016/AI-Ticket-Operations-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/xiaoanzi1016/AI-Ticket-Operations-Agent/actions/workflows/ci.yml)
+
 企业级智能工单/售后运营 Agent，基于 DeepSeek LLM + FastAPI 构建，支持订单查询、物流追踪、库存校验、退款/补发建议生成、历史案例检索（RAG）和退货风险自动升级。
+
+## 实测指标
+
+| 指标 | 数值 | 说明 |
+|---|---|---|
+| 单元测试 | 137 passed / 355 assert | pytest 全量 |
+| 端到端评测 | 8/8 连续 2 轮 100% | 真实 LLM，normal/boundary/attack |
+| 攻击拦截率 | 3/3 | 架构保证，非模型自觉 |
+| 多模型对比 | 2 模型均 4/4 | deepseek-flash / deepseek-v4-pro |
+| 平均耗时 | ~5.5s/用例 | 含 LLM 推理 |
+| 平均 Token | ~2300/用例 | 含上下文+输出 |
+
+> 上表每个数字的口径、证据文件与复现命令见 [`简历可信数值-AI-Ticket-Operations-Agent.md`](./简历可信数值-AI-Ticket-Operations-Agent.md)。
+> 该文档同时登记了**已作废**的旧口径（含一次"零 LLM 调用却报满分"的自欺数据），以及指标**可证伪性**的对照实验（把闸门改成"全部拒绝"后指标会掉，证明它不是恒真的）。
 
 ## 技术栈
 
@@ -103,7 +124,7 @@ scripts/
 └── run_api.py            # API 服务启动
 
 tests/                    # 137 项 pytest 测试
-docs/                     # 交付文档
+docs/                     # 交付文档（架构说明见 docs/architecture.md）
 ```
 
 ## 测试
@@ -112,10 +133,16 @@ docs/                     # 交付文档
 # 运行全部测试
 python -m pytest tests/ -q
 
+# 带覆盖率
+python -m pytest tests/ -q --cov=src --cov-report=term-missing:skip-covered
+
 # 运行特定测试
 python -m pytest tests/test_return_risk.py -v
 python -m pytest tests/test_persistence.py -v
 ```
+
+CI（`.github/workflows/ci.yml`）共 5 个任务：Linux / Windows × Python 3.11 / 3.13
+四个测试矩阵，外加一个 Docker 镜像构建任务，全部为绿。
 
 ## Docker 部署
 
@@ -127,6 +154,29 @@ docker-compose up --build
 docker-compose up -d
 ```
 
+## 版本演进
+
+### v1.0 生产级（2026.07）
+> 主题：架构加固 + 工程化收尾
+- 安全加固：Agent 主循环加固、退货风险规则、参数名规范化防校验绕过
+- 记忆增强：跨会话用户画像增量统计、会话记忆 TTL、FTS5 历史案例 RAG
+- 评测体系：可证伪指标、normal/boundary/attack 三类用例、多模型对比
+- 工程化：GitHub Actions CI（5 矩阵全绿）、Docker 部署、依赖清单完善
+- 测试：137 项 pytest 全过，覆盖率 77%
+
+### v0.2 可用（2026.05-06）
+> 主题：从能跑到好用，增加可观测性与评测
+- 评测能力：真实 LLM 端到端评测执行器（8 用例 100% 通过）
+- 记忆系统：用户画像增量统计、会话记忆接入、画像注入 system prompt
+- 审计留痕：审批控制台 CLI、审计序列化导出、工具调用 Trace 埋点
+- 多模型：compare_models.py 脚本，支持多模型公平对比
+
+### v0.1 原型（2026.05）
+> 主题：从零到一，跑通核心链路
+- 数据源：接入极客云模拟数据（5000 行订单/库存/退货 CSV）
+- Agent 基础：LLM 建议生成器、工具调用主循环
+- 安全基础：参数名规范化、库存闸门拦截缺货补发
+
 ## 核心设计决策
 
 ### 为什么用 SQLite FTS5 而不是向量数据库？
@@ -137,6 +187,10 @@ docker-compose up -d
 - 零模型下载（不用 torch / 470MB 模型）
 - 通过 bigram 切词 + 同义词表解决中文检索问题
 - 售后工单关键词明确（"少发"、"退款"、"破损"），BM25 足够满足需求
+
+> 代价要说清楚：FTS5 是纯关键词检索，**语义泛化能力弱于向量方案** ——
+> "东西碎了" 能命中 "破损" 靠的是硬编码同义词表，表外就漏。
+> 换来的是零依赖、零下载、离线可用。这是一次主动的权衡，不是能力退化。
 
 ### 双通路数据源设计
 
@@ -157,7 +211,7 @@ python scripts/migrate_csv_to_db.py --reset
 
 ## 实习背景
 
-本项目为 2026.05 - 2026.07 在上海伍特尔集团运营实习期间独立开发，用于智能化工单处理与售后决策支持。
+本项目为 2026.05 - 2026.07 在上海 Wutier（wutier.com）运营实习期间独立开发，用于智能化工单处理与售后决策支持。
 
 ## License
 
